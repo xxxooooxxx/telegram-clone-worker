@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from telethon import TelegramClient
+from telethon import TelegramClient, utils
 from telethon.errors import (
     AuthKeyUnregisteredError,
     ChannelPrivateError,
@@ -227,15 +227,13 @@ async def healthz():
 @app.get("/health")
 async def health():
     accounts = []
-    for phone, creds in _load_accounts().items():
-        authorized = False
+    # Reuse the cached client via _get_client: opening a second
+    # TelegramClient on the same SQLite session file races the first
+    # client's uncommitted transaction and reads a stale DB.
+    for phone in _load_accounts().keys():
         try:
-            client = TelegramClient(_session_path(phone), int(creds["api_id"]), creds["api_hash"])
-            await client.connect()
-            try:
-                authorized = await client.is_user_authorized()
-            finally:
-                await client.disconnect()
+            await _get_client(phone)
+            authorized = True
         except Exception:
             authorized = False
         accounts.append({"phone": phone, "authorized": authorized})
@@ -252,8 +250,15 @@ async def login_send_code(request: Request):
         return _json_error(400, "invalid_request", "phone, api_id and api_hash are required")
     try:
         async with _lock_for(phone):
-            client = TelegramClient(_session_path(phone), int(api_id), str(api_hash))
-            await client.connect()
+            # Reuse the cached client when it's still connected: two
+            # TelegramClients on the same SQLite session file race each
+            # other's uncommitted transactions.
+            client = _clients.get(phone)
+            fresh = False
+            if client is None or not client.is_connected():
+                client = TelegramClient(_session_path(phone), int(api_id), str(api_hash))
+                await client.connect()
+                fresh = True
             try:
                 if await client.is_user_authorized():
                     _clients[phone] = client
@@ -272,8 +277,9 @@ async def login_send_code(request: Request):
                 _clients[phone] = client
                 return {"ok": True, "already_authorized": False}
             except Exception:
-                await client.disconnect()
-                _clients.pop(phone, None)
+                if fresh:
+                    await client.disconnect()
+                    _clients.pop(phone, None)
                 raise
     except Exception as e:
         status, code, message, extra = _map_telethon_error(e)
@@ -313,6 +319,12 @@ async def login_confirm(request: Request):
                     if not password:
                         return _json_error(400, "2fa_required", "two-factor password required")
                     await client.sign_in(password=str(password))
+                # Commit the session to disk NOW. Telethon only flushes the
+                # SQLite session on save()/close(); sign_in leaves the auth
+                # in an uncommitted transaction, so without this a second
+                # client on the same file reads a stale DB and a bridge
+                # restart rolls the journal back, losing the login.
+                await utils.maybe_async(client.session.save())
                 accounts = _load_accounts()
                 accounts[phone] = {"api_id": int(api_id), "api_hash": str(api_hash)}
                 _save_accounts(accounts)
