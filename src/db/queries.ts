@@ -39,14 +39,20 @@ export async function insertBot(
 
 export async function listBotsSummary(db: D1Database): Promise<BotSummary[]> {
   const { results } = await db
-    .prepare(`SELECT id, bot_id, bot_username, label, created_at FROM bots ORDER BY created_at DESC`)
+    .prepare(
+      `SELECT id, bot_id, bot_username, label, created_at FROM bots WHERE id != ? ORDER BY created_at DESC`,
+    )
+    .bind(PROTOCOL_BOT_SENTINEL)
     .all<BotSummary>();
   return results;
 }
 
 export async function listBotsWithSecrets(db: D1Database): Promise<BotRow[]> {
   const { results } = await db
-    .prepare(`SELECT id, token, bot_id, bot_username, label, webhook_secret, last_update_id, created_at FROM bots ORDER BY created_at DESC`)
+    .prepare(
+      `SELECT id, token, bot_id, bot_username, label, webhook_secret, last_update_id, created_at FROM bots WHERE id != ? ORDER BY created_at DESC`,
+    )
+    .bind(PROTOCOL_BOT_SENTINEL)
     .all<BotRow>();
   return results;
 }

@@ -1,3 +1,5 @@
+import { PROTOCOL_BOT_SENTINEL } from "./queries";
+
 /**
  * Automatic D1 Database Bootstrap Helper
  *
@@ -40,6 +42,15 @@ export async function ensureDatabaseBootstrap(db: D1Database): Promise<void> {
       if (!names.has("protocol_account_id")) {
         await db.prepare(`ALTER TABLE tasks ADD COLUMN protocol_account_id TEXT`).run();
       }
+      // Protocol-mode tasks use bot_id = PROTOCOL_BOT_SENTINEL, which must
+      // satisfy the tasks.bot_id -> bots(id) foreign key.
+      await db
+        .prepare(
+          `INSERT OR IGNORE INTO bots (id, token, bot_id, bot_username, label, webhook_secret)
+           VALUES (?, '', 0, 'protocol', 'Protocol accounts', '')`,
+        )
+        .bind(PROTOCOL_BOT_SENTINEL)
+        .run();
       bootstrapDone = true;
       return;
     }
@@ -155,6 +166,12 @@ export async function ensureDatabaseBootstrap(db: D1Database): Promise<void> {
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_saved_tasks_task_id ON saved_tasks(task_id)`),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_pending_messages_task_id ON task_pending_messages(task_id, id ASC)`),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_updates_bot_id ON updates(bot_id, received_at DESC)`),
+      // Sentinel row so protocol-mode tasks (bot_id = 'protocol') satisfy
+      // the tasks.bot_id -> bots(id) foreign key on fresh databases.
+      db.prepare(
+        `INSERT OR IGNORE INTO bots (id, token, bot_id, bot_username, label, webhook_secret)
+         VALUES ('${PROTOCOL_BOT_SENTINEL}', '', 0, 'protocol', 'Protocol accounts', '')`,
+      ),
     ]);
 
     bootstrapDone = true;
