@@ -7,16 +7,26 @@ import { useAuth } from "../lib/useAuth";
 import { AuthPage } from "../pages/AuthPage";
 import type { BotSummary, TaskSummary } from "../../shared/rpcTypes";
 
-type Section = "tasks" | "paused" | "completed" | "add" | "bots" | "saved" | null;
+type Section = "tasks" | "paused" | "completed" | "add" | "bots" | "protocol" | "saved" | null;
 
 function sectionOf(route: Route): Section {
   if (route.type === "wizard") return "add";
   if (route.type === "paused") return "paused";
   if (route.type === "completed") return "completed";
   if (route.type === "bots") return "bots";
+  if (route.type === "protocol-accounts") return "protocol";
   if (route.type === "saved-tasks") return "saved";
   if (route.type === "empty") return "tasks";
   return null;
+}
+
+function ProtocolIcon() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="7" y="2" width="10" height="20" rx="2" />
+      <line x1="11" y1="18.5" x2="13" y2="18.5" />
+    </svg>
+  );
 }
 
 function PausedIcon() {
@@ -326,6 +336,16 @@ export function AppNav() {
             <div className="sidebar-nav-item-left">
               <BotsIcon />
               <span>Connected Bots</span>
+            </div>
+          </button>
+
+          <button
+            className={`sidebar-nav-item${section === "protocol" ? " is-active" : ""}`}
+            onClick={() => handleNav("protocol-accounts")}
+          >
+            <div className="sidebar-nav-item-left">
+              <ProtocolIcon />
+              <span>Protocol Accounts</span>
             </div>
           </button>
 

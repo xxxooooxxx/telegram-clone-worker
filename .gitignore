@@ -9,3 +9,4 @@ dist/
 .dev.vars.*
 *.tsbuildinfo
 /.playwright-mcp
+__pycache__/

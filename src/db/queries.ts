@@ -2,13 +2,18 @@ import type {
   BackfillStatus,
   BotSummary,
   ErrorReason,
+  ProtocolAccountSummary,
   SavedTaskSummary,
   SavedTaskWithToken,
   SourceTaskHistory,
   TaskDetail,
+  TaskMode,
   TaskScope,
   TaskSummary,
 } from "../shared/rpcTypes";
+
+/** Sentinel bot_id for protocol-mode tasks (no TelegramClient involved). */
+export const PROTOCOL_BOT_SENTINEL = "protocol";
 
 // Bots — every SELECT here is column-scoped on purpose. Never `SELECT *`
 // on this table from an API-facing path; the token must never serialize
@@ -108,12 +113,109 @@ export async function deleteBot(db: D1Database, id: string): Promise<void> {
   await db.prepare(`DELETE FROM bots WHERE id = ?`).bind(id).run();
 }
 
+// Protocol accounts — no secrets live here. The bridge host holds sessions
+// and api_id/api_hash; the Worker only stores the phone number and a label.
+
+export async function insertProtocolAccount(
+  db: D1Database,
+  row: { id: string; label: string; phone: string },
+): Promise<void> {
+  await db
+    .prepare(`INSERT INTO protocol_accounts (id, label, phone, status) VALUES (?, ?, ?, 'unknown')`)
+    .bind(row.id, row.label, row.phone)
+    .run();
+}
+
+export async function listProtocolAccounts(db: D1Database): Promise<ProtocolAccountSummary[]> {
+  const { results } = await db
+    .prepare(`SELECT id, label, phone, status, created_at FROM protocol_accounts ORDER BY created_at DESC`)
+    .all<ProtocolAccountSummary>();
+  return results;
+}
+
+export async function getProtocolAccount(db: D1Database, id: string): Promise<ProtocolAccountSummary | null> {
+  const row = await db
+    .prepare(`SELECT id, label, phone, status, created_at FROM protocol_accounts WHERE id = ?`)
+    .bind(id)
+    .first<ProtocolAccountSummary>();
+  return row ?? null;
+}
+
+export async function updateProtocolAccountStatus(db: D1Database, id: string, status: string): Promise<void> {
+  await db.prepare(`UPDATE protocol_accounts SET status = ? WHERE id = ?`).bind(status, id).run();
+}
+
+export async function deleteProtocolAccount(db: D1Database, id: string): Promise<void> {
+  // Protocol tasks stay but become orphaned (protocol_account_id -> NULL via
+  // ON DELETE SET NULL); stop them outright instead of leaving them running
+  // against a deleted account.
+  await db
+    .prepare(
+      `UPDATE tasks
+       SET live_enabled = 0,
+           backfill_status = CASE WHEN backfill_status IN ('running','paused') THEN 'failed' ELSE backfill_status END,
+           stop_reason = 'invalid_request',
+           stopped_at = unixepoch()
+       WHERE protocol_account_id = ? AND stop_reason IS NULL`,
+    )
+    .bind(id)
+    .run();
+  await db.prepare(`DELETE FROM protocol_accounts WHERE id = ?`).bind(id).run();
+}
+
+export async function findDuplicateProtocolTask(
+  db: D1Database,
+  accountId: string,
+  sourceChatId: string,
+  destChatId: string,
+): Promise<TaskSummary | null> {
+  const row = await db
+    .prepare(`SELECT * FROM tasks WHERE protocol_account_id = ? AND source_chat_id = ? AND dest_chat_id = ?`)
+    .bind(accountId, sourceChatId, destChatId)
+    .first();
+  return row ? rowToTask(row) : null;
+}
+
+export async function listTasksByProtocolAccount(db: D1Database, accountId: string): Promise<TaskSummary[]> {
+  const { results } = await db
+    .prepare(`SELECT * FROM tasks WHERE protocol_account_id = ? ORDER BY created_at DESC`)
+    .bind(accountId)
+    .all();
+  return results.map(rowToTask);
+}
+
+/** Stops every active task on a protocol account — e.g. the bridge reports
+ * the session unauthorized. Mirrors stopTasksForBot. */
+export async function stopTasksForProtocolAccount(
+  db: D1Database,
+  accountId: string,
+  reason: ErrorReason,
+): Promise<{ id: string; processed: number; failed: number }[]> {
+  const { results } = await db
+    .prepare(
+      `UPDATE tasks
+       SET live_enabled = 0,
+           backfill_status = CASE WHEN backfill_status IN ('running','paused') THEN 'failed' ELSE backfill_status END,
+           stop_reason = ?,
+           stopped_at = unixepoch()
+       WHERE protocol_account_id = ?
+         AND stop_reason IS NULL
+         AND (live_enabled = 1 OR backfill_status IN ('running','paused'))
+       RETURNING id, processed, failed`,
+    )
+    .bind(reason, accountId)
+    .all<{ id: string; processed: number; failed: number }>();
+  return results;
+}
+
 // Tasks
 
 function rowToTask(row: Record<string, unknown>): TaskSummary {
   return {
     id: row.id as string,
     bot_id: row.bot_id as string,
+    mode: (row.mode as TaskMode) ?? "bot",
+    protocol_account_id: (row.protocol_account_id as string) ?? null,
     label: row.label as string,
     source_chat_id: row.source_chat_id as string,
     source_chat_title: (row.source_chat_title as string) ?? null,
@@ -147,6 +249,8 @@ function rowToTask(row: Record<string, unknown>): TaskSummary {
 export interface NewTask {
   id: string;
   bot_id: string;
+  mode?: TaskMode;
+  protocol_account_id?: string | null;
   label: string;
   source_chat_id: string;
   source_chat_title: string | null;
@@ -170,14 +274,16 @@ export async function insertTask(db: D1Database, t: NewTask): Promise<void> {
   await db
     .prepare(
       `INSERT INTO tasks (
-        id, bot_id, label, source_chat_id, source_chat_title, dest_chat_id, dest_chat_title,
+        id, bot_id, mode, protocol_account_id, label, source_chat_id, source_chat_title, dest_chat_id, dest_chat_title,
         scope, live_enabled, backfill_mode, start_id, end_id, cursor, total, backfill_status, pacing_batch_size,
         filter_media_types, filter_min_size_bytes, filter_max_size_bytes
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
       t.id,
       t.bot_id,
+      t.mode ?? "bot",
+      t.protocol_account_id ?? null,
       t.label,
       t.source_chat_id,
       t.source_chat_title,
@@ -224,10 +330,11 @@ export async function getTaskWithBot(db: D1Database, id: string): Promise<TaskDe
   const row = await db
     .prepare(
       `SELECT tasks.*,
-              COALESCE(bots.bot_username, 'unknown') as bot_username,
+              COALESCE(bots.bot_username, pa.label, 'unknown') as bot_username,
               (SELECT COUNT(*) FROM task_pending_messages WHERE task_id = tasks.id) as pending_count
        FROM tasks
        LEFT JOIN bots ON bots.id = tasks.bot_id
+       LEFT JOIN protocol_accounts pa ON pa.id = tasks.protocol_account_id
        WHERE tasks.id = ?`,
     )
     .bind(id)
@@ -247,11 +354,12 @@ export async function listTasksForSourceChat(db: D1Database, chatIds: string[]):
     .prepare(
       `SELECT
          tasks.*,
-         COALESCE(bots.bot_username, 'unknown') as bot_username,
-         COALESCE(bots.label, 'Bot') as bot_label,
+         COALESCE(bots.bot_username, pa.label, 'unknown') as bot_username,
+         COALESCE(bots.label, pa.label, 'Bot') as bot_label,
          (SELECT MAX(at) FROM task_activity_log WHERE task_id = tasks.id) AS last_activity_at
        FROM tasks
        LEFT JOIN bots ON bots.id = tasks.bot_id
+       LEFT JOIN protocol_accounts pa ON pa.id = tasks.protocol_account_id
        WHERE tasks.source_chat_id IN (${placeholders})
        ORDER BY tasks.created_at DESC`,
     )
@@ -611,6 +719,7 @@ export async function claimTask(db: D1Database, id: string, leaseSeconds: number
          AND NOT EXISTS (
            SELECT 1 FROM tasks sibling
            WHERE sibling.bot_id = tasks.bot_id
+             AND COALESCE(sibling.protocol_account_id, '') = COALESCE(tasks.protocol_account_id, '')
              AND sibling.id <> tasks.id
              AND sibling.lease_expires_at IS NOT NULL
              AND sibling.lease_expires_at >= unixepoch()
@@ -627,14 +736,19 @@ export async function claimTask(db: D1Database, id: string, leaseSeconds: number
  * limit — back-to-back calls from the same bot are the likely amplifier,
  * so the whole bot backs off together rather than just the task that hit
  * the 429. Re-checked by listRunningBackfillTasks/claimTask (backfill) and
- * the webhook live-forward loop before either makes another Telegram call. */
-export async function pauseBotForRateLimit(db: D1Database, botId: string, until: number): Promise<void> {
+ * the webhook live-forward loop before either makes another Telegram call.
+ *
+ * `key` is a bot id for bot-mode tasks or a protocol account id for
+ * protocol-mode tasks — the OR clause covers both without changing the
+ * bot-path behavior (bot tasks never carry a protocol_account_id). */
+export async function pauseBotForRateLimit(db: D1Database, key: string, until: number): Promise<void> {
   await db
     .prepare(
       `UPDATE tasks SET rate_limited_until = ?
-       WHERE bot_id = ? AND (backfill_status = 'running' OR live_enabled = 1)`,
+       WHERE (bot_id = ? OR protocol_account_id = ?)
+         AND (backfill_status = 'running' OR live_enabled = 1)`,
     )
-    .bind(until, botId)
+    .bind(until, key, key)
     .run();
 }
 
@@ -643,6 +757,18 @@ export async function pauseBotForRateLimit(db: D1Database, botId: string, until:
  * from a `finally` — a no-op if the task was deleted or never leased. */
 export async function releaseTaskLease(db: D1Database, id: string): Promise<void> {
   await db.prepare(`UPDATE tasks SET lease_expires_at = NULL WHERE id = ?`).bind(id).run();
+}
+
+/** Advances a protocol task's live watermark cursor. Unlike bot tasks (which
+ * rely on the per-bot getUpdates offset), protocol live sync has no global
+ * offset — each task tracks its own high-water mark in `cursor`. Only used
+ * when the backfill doesn't own the cursor (live scope, or backfill not
+ * running); the WHERE guard keeps it monotonic. */
+export async function advanceLiveCursor(db: D1Database, taskId: string, cursor: number): Promise<void> {
+  await db
+    .prepare(`UPDATE tasks SET cursor = ? WHERE id = ? AND (cursor IS NULL OR cursor < ?)`)
+    .bind(cursor, taskId, cursor)
+    .run();
 }
 
 // Activity log

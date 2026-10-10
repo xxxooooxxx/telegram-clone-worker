@@ -34,6 +34,7 @@ export interface BotVerifyResult {
 }
 
 export type TaskScope = "live" | "live_and_backfill" | "backfill_only";
+export type TaskMode = "bot" | "protocol";
 export type BackfillStatus =
   | "not_applicable"
   | "pending"
@@ -43,9 +44,19 @@ export type BackfillStatus =
   | "cancelled"
   | "failed";
 
+export interface ProtocolAccountSummary {
+  id: string;
+  label: string;
+  phone: string;
+  status: string;
+  created_at: number;
+}
+
 export interface TaskSummary {
   id: string;
   bot_id: string;
+  mode: TaskMode;
+  protocol_account_id: string | null;
   label: string;
   source_chat_id: string;
   source_chat_title: string | null;
@@ -77,6 +88,11 @@ export interface TaskSummary {
 
 export interface TaskDetail extends TaskSummary {
   bot_username: string;
+}
+
+export interface BridgeConfigResponse {
+  url: string | null;
+  configured: boolean;
 }
 
 export interface CapabilityEntry {

@@ -10,6 +10,7 @@ import { useHashRoute } from "./lib/router";
 import { TaskWizardPage } from "./pages/TaskWizardPage";
 import { TaskDetailPage } from "./pages/TaskDetailPage";
 import { BotsManagePage } from "./pages/BotsManagePage";
+import { ProtocolAccountsPage } from "./pages/ProtocolAccountsPage";
 import { SavedTasksPage } from "./pages/SavedTasksPage";
 import { CompletedTasksPage } from "./pages/CompletedTasksPage";
 import { PausedTasksPage } from "./pages/PausedTasksPage";
@@ -23,6 +24,7 @@ function Page() {
   if (route.type === "paused") return <PausedTasksPage />;
   if (route.type === "completed") return <CompletedTasksPage />;
   if (route.type === "bots") return <BotsManagePage />;
+  if (route.type === "protocol-accounts") return <ProtocolAccountsPage />;
   if (route.type === "saved-tasks") return <SavedTasksPage />;
   return <EmptyStatePage />;
 }

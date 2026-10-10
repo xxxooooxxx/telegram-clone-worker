@@ -6,6 +6,7 @@ export type Route =
   | { type: "paused" }
   | { type: "completed" }
   | { type: "bots" }
+  | { type: "protocol-accounts" }
   | { type: "saved-tasks" }
   | { type: "empty" };
 
@@ -21,6 +22,7 @@ function parseHash(): Route {
   if (kind === "paused") return { type: "paused" };
   if (kind === "completed") return { type: "completed" };
   if (kind === "bots") return { type: "bots" };
+  if (kind === "protocol-accounts") return { type: "protocol-accounts" };
   if (kind === "saved-tasks") return { type: "saved-tasks" };
   return { type: "empty" };
 }

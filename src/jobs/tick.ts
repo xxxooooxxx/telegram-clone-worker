@@ -5,7 +5,6 @@ import {
   appendActivityLog,
   claimTask,
   deletePendingMessages,
-  extendTaskEndId,
   getBotWithSecrets,
   incrementLiveCounters,
   insertPendingMessage,
@@ -19,8 +18,10 @@ import {
   stopTasksForBot,
   updateBotLastUpdateId,
   type BotRow,
+  type PendingMessageRow,
 } from "../db/queries";
 import type { TaskSummary } from "../shared/rpcTypes";
+import { drainProtocolPending, runProtocolGroup } from "./protocolTick";
 import { runWithConcurrency } from "../shared/concurrencyPool";
 import {
   evaluateMessageFilter,
@@ -67,12 +68,17 @@ export async function runTick(env: Env): Promise<void> {
   const tickStartedAtMs = Date.now();
   const tasks = await listActiveSyncTasks(env.DB);
 
-  // Group by bot_id — tasks arrive pre-sorted by bot_id (listActiveSyncTasks'
-  // ORDER BY), so a simple adjacent-run grouping is enough.
+  // Group by execution identity: bot tasks by bot_id, protocol tasks by
+  // protocol_account_id. Tasks arrive pre-sorted by bot_id
+  // (listActiveSyncTasks' ORDER BY), so a simple adjacent-run grouping is
+  // enough — all protocol tasks (bot_id = 'protocol') arrive adjacently and
+  // are then split per account by the group key below.
+  const groupKey = (t: TaskSummary) =>
+    t.mode === "protocol" ? `p:${t.protocol_account_id ?? ""}` : `b:${t.bot_id}`;
   const groups: TaskSummary[][] = [];
   for (const task of tasks) {
     const lastGroup = groups[groups.length - 1];
-    if (lastGroup && lastGroup[0].bot_id === task.bot_id) {
+    if (lastGroup && groupKey(lastGroup[0]) === groupKey(task)) {
       lastGroup.push(task);
     } else {
       groups.push([task]);
@@ -94,6 +100,12 @@ export async function runTick(env: Env): Promise<void> {
   await runWithConcurrency(groups, MAX_CONCURRENT_BOTS, async (groupTasks) => {
     // In Round-Robin mode, honor the time budget to avoid overlapping next cron
     if (!isSmoothMode && Date.now() - tickStartedAtMs > MAX_TICK_WALL_TIME_MS) {
+      return;
+    }
+
+    // Protocol-mode tasks run against the bridge (MTProto), not the Bot API.
+    if (groupTasks[0].mode === "protocol") {
+      batchesRun += await runProtocolGroup(env, groupTasks);
       return;
     }
 
@@ -277,6 +289,8 @@ async function drainPendingMessagesForTask(env: Env, task: TaskSummary): Promise
 
   const pending = await listPendingMessages(env.DB, task.id, 60);
   if (pending.length === 0) return false;
+
+  if (task.mode === "protocol") return drainProtocolPending(env, task, pending);
 
   const bot = await getBotWithSecrets(env.DB, task.bot_id);
   if (!bot) return false;

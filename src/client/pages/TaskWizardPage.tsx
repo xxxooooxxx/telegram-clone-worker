@@ -12,7 +12,9 @@ import type {
   BotVerifyResult,
   ChatLookupResult,
   ErrorReason,
+  ProtocolAccountSummary,
   SavedTaskWithToken,
+  TaskMode,
   TaskScope,
   TaskSummary,
 } from "../../shared/rpcTypes";
@@ -77,7 +79,16 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
   const runningBackfillTasks = (botActiveTasks ?? []).filter((t) => t.backfill_status === "running");
   const hasRunningBackfill = runningBackfillTasks.length > 0;
 
+  // Protocol mode state
+  const [cloneMode, setCloneMode] = useState<TaskMode>("bot");
+  const [selectedProtocolAccountId, setSelectedProtocolAccountId] = useState("");
+  const { data: protocolAccounts } = usePolling(() => api.get<ProtocolAccountSummary[]>("/api/protocol-accounts"), 15000);
+  const selectedProtocolAccount = protocolAccounts?.find((a) => a.id === selectedProtocolAccountId);
+
+  const hasAccount = cloneMode === "bot" ? hasBot : !!selectedProtocolAccountId;
+
   function botQuery(): string {
+    if (cloneMode === "protocol") return `protocolAccountId=${selectedProtocolAccountId}`;
     if (pendingBot) return `token=${encodeURIComponent(pendingBot.token)}&botTelegramId=${pendingBot.bot_id}`;
     return `botId=${selectedBotId}`;
   }
@@ -156,7 +167,7 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
   }
 
   async function lookupSource() {
-    if (!hasBot || !sourceChatId) return;
+    if (!hasAccount || !sourceChatId) return;
     setLookingUpSource(true);
     setSourceError(null);
     setSourceLookup(null);
@@ -167,7 +178,7 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
   }
 
   async function lookupDest() {
-    if (!hasBot || !destChatId) return;
+    if (!hasAccount || !destChatId) return;
     setLookingUpDest(true);
     setDestError(null);
     setDestLookup(null);
@@ -273,8 +284,13 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
       filterMinSizeBytes: minBytes,
       filterMaxSizeBytes: maxBytes,
     };
-    const botPathId = pendingBot ? "new" : selectedBotId;
-    const res = await api.post<TaskSummary>(`/api/bots/${botPathId}/tasks`, body);
+    let res: Awaited<ReturnType<typeof api.post<TaskSummary>>>;
+    if (cloneMode === "protocol") {
+      res = await api.post<TaskSummary>("/api/protocol-tasks", { ...body, protocolAccountId: selectedProtocolAccountId });
+    } else {
+      const botPathId = pendingBot ? "new" : selectedBotId;
+      res = await api.post<TaskSummary>(`/api/bots/${botPathId}/tasks`, body);
+    }
     setCreating(false);
     if (res.ok) {
       toast.show("success", "Task created");
@@ -283,7 +299,10 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
     }
     const duplicateTaskId = (res as { duplicateTaskId?: string }).duplicateTaskId;
     if (duplicateTaskId) {
-      const dup = await api.get<TaskSummary[]>(`/api/bots/${selectedBotId}/tasks`);
+      const dup =
+        cloneMode === "protocol"
+          ? await api.get<TaskSummary[]>(`/api/protocol-accounts/${selectedProtocolAccountId}/tasks`)
+          : await api.get<TaskSummary[]>(`/api/bots/${selectedBotId}/tasks`);
       if (dup.ok) {
         const found = dup.data.find((t) => t.id === duplicateTaskId);
         if (found) setDuplicate(found);
@@ -304,19 +323,83 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
         </button>
       </PageHero>
 
-      {/* Step 1: Bot Selection */}
+      {/* Step 1: Clone Method */}
       <div className="card">
         <div className="card-header">
           <div className="card-title">
-            <span className={`step-pill ${hasBot ? "done" : "active"}`}>
-              {hasBot ? "✓" : "1"}
+            <span className={`step-pill ${hasAccount ? "done" : "active"}`}>
+              {hasAccount ? "✓" : "1"}
             </span>
-            <span>1. Select Telegram Bot</span>
+            <span>1. Select Clone Method</span>
           </div>
-          {hasBot && <span className="badge badge-live">Connected</span>}
+          {hasAccount && <span className="badge badge-live">Connected</span>}
         </div>
 
-        {!hasBot ? (
+        <div className="row" style={{ marginBottom: 14 }}>
+          <label className="row" style={{ gap: 6, cursor: "pointer", fontWeight: 600 }}>
+            <input type="radio" checked={cloneMode === "bot"} onChange={() => setCloneMode("bot")} /> 🤖 Bot
+          </label>
+          <label className="row" style={{ gap: 6, cursor: "pointer", fontWeight: 600 }}>
+            <input type="radio" checked={cloneMode === "protocol"} onChange={() => setCloneMode("protocol")} /> 📱 Protocol account
+          </label>
+        </div>
+
+        {cloneMode === "protocol" ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            <div className="field" style={{ marginBottom: 0 }}>
+              <label>Select Protocol Account</label>
+              <select
+                className="input"
+                value={selectedProtocolAccountId}
+                onChange={(e) => setSelectedProtocolAccountId(e.target.value)}
+              >
+                <option value="">Choose a protocol account…</option>
+                {(protocolAccounts ?? []).map((a) => (
+                  <option key={a.id} value={a.id}>
+                    {a.label} ({a.phone}) — {a.status}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <p className="text-muted" style={{ fontSize: 12, margin: 0 }}>
+              Sessions live on the bridge host, never in the Worker.{" "}
+              <a href="#/protocol-accounts" style={{ color: "var(--accent)" }}>
+                Manage accounts & bridge connection ↗
+              </a>
+            </p>
+            {selectedProtocolAccount && (
+              <div
+                style={{
+                  display: "flex",
+                  justifyContent: "space-between",
+                  alignItems: "center",
+                  padding: "12px 16px",
+                  background: "var(--surface-raised)",
+                  border: "1px solid color-mix(in oklab, var(--success) 35%, transparent)",
+                  borderRadius: "var(--radius)",
+                }}
+              >
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <span style={{ fontSize: 24 }}>📱</span>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: "var(--ink)" }}>
+                      {selectedProtocolAccount.label}
+                      <span className="text-muted" style={{ fontWeight: 400, marginLeft: 8, fontSize: 13 }}>
+                        ({selectedProtocolAccount.phone})
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "var(--muted)", marginTop: 2 }}>
+                      Status: {selectedProtocolAccount.status}
+                    </div>
+                  </div>
+                </div>
+                <button className="btn btn-secondary btn-sm" onClick={() => setSelectedProtocolAccountId("")}>
+                  Change
+                </button>
+              </div>
+            )}
+          </div>
+        ) : !hasBot ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             {/* Primary: Add Telegram Bot Token (Always on top) */}
             <div>
@@ -572,7 +655,7 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
       </div>
 
       {/* Step 2: Source Chat */}
-      {hasBot && (
+      {hasAccount && (
         <div className="card">
           <div className="card-header">
             <div className="card-title">
@@ -827,9 +910,11 @@ export function TaskWizardPage({ fromSavedId }: { fromSavedId?: string }) {
             <>
               <p className="text-muted" style={{ fontSize: 13, marginBottom: 16 }}>
                 <strong>{destLookup.chat.title ?? destLookup.chat.id}</strong> —{" "}
-                {destLookup.capabilities.find((c) => c.key === "send_message")?.available
-                  ? "bot can post here ✓"
-                  : "bot cannot post here ✗"}
+                {cloneMode === "protocol"
+                  ? "protocol account can forward here ✓"
+                  : destLookup.capabilities.find((c) => c.key === "send_message")?.available
+                    ? "bot can post here ✓"
+                    : "bot cannot post here ✗"}
               </p>
 
               <div className="field">

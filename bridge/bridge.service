@@ -1,0 +1,18 @@
+[Unit]
+Description=Telegram Clone Worker protocol bridge (Telethon + FastAPI)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/tgclone-bridge
+Environment=BRIDGE_SECRET=__SET_ME__
+Environment=BRIDGE_DATA_DIR=/root/tgclone-bridge/data
+Environment=BRIDGE_PORT=18787
+ExecStart=/root/tgclone-bridge/venv/bin/uvicorn app:app --host 127.0.0.1 --port 18787
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

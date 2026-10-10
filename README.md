@@ -116,6 +116,28 @@ flowchart LR
     UI <-->|Load UI| ASSETS
 ```
 
+### Protocol Account Cloning (MTProto)
+
+Besides bot-based cloning, tasks can run in **protocol mode**: the copy is executed by a
+Telegram *user account* (protocol account) through a small self-hosted bridge service instead of
+the Bot API.
+
+```mermaid
+flowchart LR
+    WORKER["Worker Engine"] -->|HTTP + X-Bridge-Secret| BRIDGE["Protocol Bridge\n(FastAPI + Telethon)\non your own server"]
+    BRIDGE <-->|MTProto| MT[("Telegram MTProto")]
+    MT -->|forward_messages| DST2["Destination Channel"]
+```
+
+- The bridge (`bridge/` in this repo) holds the MTProto sessions on its own host — the Worker
+  never stores `api_id` / `api_hash` / login codes (they only transit request bodies during login).
+- Protocol tasks use `forward_messages` (batched, per-message failure tracking); live sync polls
+  the bridge's `/sync` endpoint with a per-task watermark instead of Bot API `getUpdates`.
+- Bot and protocol tasks coexist: pick **🤖 Bot** or **📱 Protocol account** in step 1 of the
+  task wizard. Everything else (scopes, filters, backfill pacing, activity log) works the same.
+- Setup: deploy `bridge/` (see `bridge/README.md`), then open **Protocol Accounts** in the web
+  console to set the Bridge URL + Secret, add an account, and complete the code login.
+
 ---
 
 ## Things to Keep in Mind (Gotchas & Best Practices)

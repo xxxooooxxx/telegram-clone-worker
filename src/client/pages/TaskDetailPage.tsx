@@ -173,7 +173,11 @@ export function TaskDetailPage({ taskId }: { taskId: string }) {
     if (!task) return;
     setTestingCopy(true);
     setTestCopyResult(null);
-    const res = await api.post<{ message_id: number }>(`/api/bots/${task.bot_id}/tasks/${task.id}/test-copy`, {
+    const url =
+      task.mode === "protocol"
+        ? `/api/tasks/${task.id}/test-copy`
+        : `/api/bots/${task.bot_id}/tasks/${task.id}/test-copy`;
+    const res = await api.post<{ message_id: number }>(url, {
       messageId: testMessageId ? Number(testMessageId) : undefined,
     });
     setTestingCopy(false);
@@ -393,8 +397,16 @@ export function TaskDetailPage({ taskId }: { taskId: string }) {
         </div>
         <div className="task-spec-grid">
           <div className="task-spec-item">
-            <div className="task-spec-label">Connected Bot</div>
-            <div className="task-spec-value">@{task.bot_username}</div>
+            <div className="task-spec-label">{task.mode === "protocol" ? "Protocol Account" : "Connected Bot"}</div>
+            <div className="task-spec-value">
+              {task.mode === "protocol" ? (
+                <span>
+                  📱 {task.bot_username} <span className="badge" style={{ marginLeft: 6, fontSize: 10.5 }}>protocol</span>
+                </span>
+              ) : (
+                <>@{task.bot_username}</>
+              )}
+            </div>
           </div>
           <div className="task-spec-item">
             <div className="task-spec-label">Source Chat</div>

@@ -2,9 +2,12 @@ import { TelegramClient } from "../../telegram/client";
 import { toResult } from "../../telegram/errors";
 import { resolveLastN } from "../../jobs/resolveRange";
 import { createBotRecord } from "./bots";
+import { BridgeClient } from "../../protocol/bridgeClient";
 import {
+  findDuplicateProtocolTask,
   findDuplicateTask,
   getBotWithSecrets,
+  getProtocolAccount,
   getTask,
   getTaskWithBot,
   insertSavedTask,
@@ -15,6 +18,7 @@ import {
   updateTaskStatus,
   updateTaskConfig,
   deleteTask,
+  PROTOCOL_BOT_SENTINEL,
 } from "../../db/queries";
 import type { BackfillStatus, TaskScope } from "../../shared/rpcTypes";
 
@@ -312,4 +316,129 @@ export async function handleTestCopy(env: Env, botId: string, taskId: string, me
     return client.copyMessage(task.dest_chat_id, task.source_chat_id, copyId);
   });
   return json(result, result.ok ? 200 : 400);
+}
+
+/** Mode-aware test copy for any task — branches to the bridge for protocol tasks. */
+export async function handleTestCopyAny(env: Env, taskId: string, messageId?: number): Promise<Response> {
+  const task = await getTask(env.DB, taskId);
+  if (!task) return json({ ok: false, errorCode: 404, description: "task not found", reason: "invalid_request" }, 404);
+
+  if (task.mode === "protocol") {
+    if (!task.protocol_account_id) {
+      return json({ ok: false, errorCode: 0, description: "protocol task has no account", reason: "invalid_request" }, 400);
+    }
+    const account = await getProtocolAccount(env.DB, task.protocol_account_id);
+    if (!account) {
+      return json({ ok: false, errorCode: 404, description: "protocol account not found", reason: "invalid_request" }, 404);
+    }
+    const result = await toResult(async () => {
+      const bridge = await BridgeClient.fromSettings(env.DB);
+      let copyId = messageId;
+      if (!copyId) copyId = await bridge.latestId(account.phone, task.source_chat_id);
+      const res = await bridge.forwardBatch(account.phone, task.source_chat_id, task.dest_chat_id, [copyId]);
+      if (res.copied.length === 0) throw new Error(res.failed[0]?.error ?? "forward failed");
+      return { message_id: res.copied[0] };
+    });
+    return json(result, result.ok ? 200 : 400);
+  }
+
+  const bot = await getBotWithSecrets(env.DB, task.bot_id);
+  if (!bot) return json({ ok: false, errorCode: 404, description: "bot not found", reason: "invalid_request" }, 404);
+  return handleTestCopy(env, bot.id, taskId, messageId);
+}
+
+interface CreateProtocolTaskBody {
+  protocolAccountId: string;
+  sourceChatId: string;
+  sourceChatTitle?: string;
+  destChatId: string;
+  destChatTitle?: string;
+  scope: TaskScope;
+  backfillMode?: "range" | "lastN";
+  startId?: number;
+  endId?: number;
+  n?: number;
+  pacingBatchSize?: number;
+  label?: string;
+  allowDuplicate?: boolean;
+  filterMediaTypes?: string | null;
+  filterMinSizeBytes?: number | null;
+  filterMaxSizeBytes?: number | null;
+}
+
+/** Creates a protocol-mode task. Mirrors handleCreateTask minus the bot
+ * lifecycle: no token verification here (the account was verified via
+ * /verify when it was added), no saved-task templates. */
+export async function handleCreateProtocolTask(request: Request, env: Env): Promise<Response> {
+  const body = (await request.json()) as CreateProtocolTaskBody;
+
+  if (!body.protocolAccountId || !body.sourceChatId || !body.destChatId || !body.scope) {
+    return json(
+      { ok: false, errorCode: 0, description: "protocolAccountId, sourceChatId, destChatId and scope are required", reason: "invalid_request" },
+      400,
+    );
+  }
+
+  const account = await getProtocolAccount(env.DB, body.protocolAccountId);
+  if (!account) return json({ ok: false, errorCode: 404, description: "protocol account not found", reason: "invalid_request" }, 404);
+
+  const duplicate = await findDuplicateProtocolTask(env.DB, account.id, body.sourceChatId, body.destChatId);
+  if (duplicate && !body.allowDuplicate) {
+    return json(
+      { ok: false, errorCode: 0, description: "a task with this source and destination already exists", reason: "invalid_request", duplicateTaskId: duplicate.id },
+      409,
+    );
+  }
+
+  const wantsBackfill = body.scope === "live_and_backfill" || body.scope === "backfill_only";
+  const wantsLive = body.scope === "live" || body.scope === "live_and_backfill";
+
+  const result = await toResult(async () => {
+    const bridge = await BridgeClient.fromSettings(env.DB);
+
+    let startId = body.startId ?? null;
+    let endId = body.endId ?? null;
+
+    if (wantsBackfill && body.backfillMode === "lastN") {
+      // Protocol path has no probe-and-delete trick — the bridge reads the
+      // channel's latest message id directly.
+      const latest = await bridge.latestId(account.phone, body.sourceChatId);
+      const n = body.n ?? 1;
+      endId = latest;
+      startId = Math.max(1, latest - n + 1);
+    }
+
+    const id = crypto.randomUUID();
+    const label =
+      body.label ?? `${body.sourceChatTitle ?? body.sourceChatId} → ${body.destChatTitle ?? body.destChatId}`;
+    const pacingBatchSize = body.pacingBatchSize ?? 50;
+
+    await insertTask(env.DB, {
+      id,
+      bot_id: PROTOCOL_BOT_SENTINEL,
+      mode: "protocol",
+      protocol_account_id: account.id,
+      label,
+      source_chat_id: body.sourceChatId,
+      source_chat_title: body.sourceChatTitle ?? null,
+      dest_chat_id: body.destChatId,
+      dest_chat_title: body.destChatTitle ?? null,
+      scope: body.scope,
+      live_enabled: wantsLive,
+      backfill_mode: wantsBackfill ? (body.backfillMode ?? "range") : null,
+      start_id: startId,
+      end_id: endId,
+      cursor: wantsBackfill ? startId : null,
+      total: wantsBackfill && startId !== null && endId !== null ? endId - startId + 1 : null,
+      backfill_status: wantsBackfill ? "running" : "not_applicable",
+      pacing_batch_size: pacingBatchSize,
+      filter_media_types: body.filterMediaTypes ?? null,
+      filter_min_size_bytes: body.filterMinSizeBytes ?? null,
+      filter_max_size_bytes: body.filterMaxSizeBytes ?? null,
+    });
+
+    return await getTask(env.DB, id);
+  });
+
+  return json(result, result.ok ? 201 : 400);
 }

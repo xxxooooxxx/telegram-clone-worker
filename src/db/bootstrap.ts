@@ -24,6 +24,22 @@ export async function ensureDatabaseBootstrap(db: D1Database): Promise<void> {
       .first<{ name: string }>();
 
     if (existing) {
+      // Existing database: idempotent migration for protocol-account support.
+      await db.prepare(`CREATE TABLE IF NOT EXISTS protocol_accounts (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`).run();
+      const cols = await db.prepare(`PRAGMA table_info(tasks)`).all<{ name: string }>();
+      const names = new Set((cols.results ?? []).map((c) => c.name));
+      if (!names.has("mode")) {
+        await db.prepare(`ALTER TABLE tasks ADD COLUMN mode TEXT NOT NULL DEFAULT 'bot'`).run();
+      }
+      if (!names.has("protocol_account_id")) {
+        await db.prepare(`ALTER TABLE tasks ADD COLUMN protocol_account_id TEXT`).run();
+      }
       bootstrapDone = true;
       return;
     }
@@ -48,6 +64,8 @@ export async function ensureDatabaseBootstrap(db: D1Database): Promise<void> {
       db.prepare(`CREATE TABLE IF NOT EXISTS tasks (
         id TEXT PRIMARY KEY,
         bot_id TEXT NOT NULL REFERENCES bots(id) ON DELETE CASCADE,
+        mode TEXT NOT NULL DEFAULT 'bot' CHECK(mode IN ('bot', 'protocol')),
+        protocol_account_id TEXT REFERENCES protocol_accounts(id) ON DELETE SET NULL,
         label TEXT NOT NULL,
         source_chat_id TEXT NOT NULL,
         source_chat_title TEXT,
@@ -122,6 +140,13 @@ export async function ensureDatabaseBootstrap(db: D1Database): Promise<void> {
         update_id INTEGER NOT NULL,
         payload_json TEXT NOT NULL,
         received_at INTEGER NOT NULL DEFAULT (unixepoch())
+      )`),
+      db.prepare(`CREATE TABLE IF NOT EXISTS protocol_accounts (
+        id TEXT PRIMARY KEY,
+        label TEXT NOT NULL,
+        phone TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'unknown',
+        created_at INTEGER NOT NULL DEFAULT (unixepoch())
       )`),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_tasks_bot_id ON tasks(bot_id)`),
       db.prepare(`CREATE INDEX IF NOT EXISTS idx_tasks_source_chat ON tasks(bot_id, source_chat_id)`),
