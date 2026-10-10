@@ -277,7 +277,7 @@ export async function insertTask(db: D1Database, t: NewTask): Promise<void> {
         id, bot_id, mode, protocol_account_id, label, source_chat_id, source_chat_title, dest_chat_id, dest_chat_title,
         scope, live_enabled, backfill_mode, start_id, end_id, cursor, total, backfill_status, pacing_batch_size,
         filter_media_types, filter_min_size_bytes, filter_max_size_bytes
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
     )
     .bind(
       t.id,
